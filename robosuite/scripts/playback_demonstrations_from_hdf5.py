@@ -4,53 +4,54 @@ a set of demonstrations stored in a hdf5 file.
 
 Arguments:
     --folder (str): Path to demonstrations
-    --use-actions (optional): If this flag is provided, the actions are played back
+    --use_actions (optional): If this flag is provided, the actions are played back
         through the MuJoCo simulator, instead of loading the simulator states
         one by one.
-    --visualize-gripper (optional): If set, will visualize the gripper site
 
 Example:
     $ python playback_demonstrations_from_hdf5.py --folder ../models/assets/demonstrations/SawyerPickPlace/
 """
-
 import os
 import h5py
 import argparse
 import random
+from os import path
+import imageio
 import numpy as np
-import json
 
 import robosuite
 from robosuite.utils.mjcf_utils import postprocess_model_xml
+ROBOSUITE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--folder",
         type=str,
-        help="Path to your demonstration folder that contains the demo.hdf5 file, e.g.: "
-             "'path_to_assets_dir/demonstrations/YOUR_DEMONSTRATION'"
-    ),
+        default=os.path.join(
+            robosuite.models.assets_root, "demonstrations/SawyerNutAssembly"
+        ),
+    )
     parser.add_argument(
-        "--use-actions", 
+        "--use-actions",
         action='store_true',
     )
+    parser.add_argument("--recording", type=bool, default=True)
     args = parser.parse_args()
 
     demo_path = args.folder
     hdf5_path = os.path.join(demo_path, "demo.hdf5")
     f = h5py.File(hdf5_path, "r")
     env_name = f["data"].attrs["env"]
-    env_info = json.loads(f["data"].attrs["env_info"])
 
     env = robosuite.make(
-        **env_info,
+        env_name,
         has_renderer=True,
-        has_offscreen_renderer=False,
         ignore_done=True,
-        use_camera_obs=False,
+        use_camera_obs=True,
+        gripper_visualization=False,
         reward_shaping=True,
-        control_freq=20,
+        control_freq=100,
     )
 
     # list of all demonstrations episodes
@@ -63,7 +64,10 @@ if __name__ == "__main__":
         ep = random.choice(demos)
 
         # read the model xml, using the metadata stored in the attribute for this episode
-        model_xml = f["data/{}".format(ep)].attrs["model_file"]
+        model_file = f["data/{}".format(ep)].attrs["model_file"]
+        model_path = os.path.join(demo_path, "models", model_file)
+        with open(model_path, "r") as model_f:
+            model_xml = model_f.read()
 
         env.reset()
         xml = postprocess_model_xml(model_xml)
@@ -72,8 +76,22 @@ if __name__ == "__main__":
         env.viewer.set_camera(0)
 
         # load the flattened mujoco states
-        states = f["data/{}/states".format(ep)][()]
+        states = f["data/{}/states".format(ep)]
+        if args.recording:
+            file_path = os.path.abspath(os.path.join(ROBOSUITE_DIR, 'videos'))
+            if not path.exists(file_path):
+                os.mkdir(file_path)
+                file_name = 'vid_0.mp4'
+            else:
+                vids = os.listdir(file_path)
+                nums = [int(v.split('vid_')[1].split('.')[0]) for v in vids if 'vid_' in v]
+                num = max(nums) + 1 if nums.__len__() > 0 else 0
+                file_name = 'vid_' + str(num) + '.mp4'
 
+            fname = os.path.abspath(os.path.join(ROBOSUITE_DIR, 'videos', file_name))
+            writer = imageio.get_writer(fname, fps=120)
+
+        args.use_actions=True
         if args.use_actions:
 
             # load the initial state
@@ -81,19 +99,23 @@ if __name__ == "__main__":
             env.sim.forward()
 
             # load the actions and play them back open-loop
-            actions = np.array(f["data/{}/actions".format(ep)][()])
+            jvels = f["data/{}/joint_velocities".format(ep)]
+            grip_acts = f["data/{}/gripper_actuations".format(ep)]
+            actions = np.concatenate([jvels, grip_acts], axis=1)
             num_actions = actions.shape[0]
 
             for j, action in enumerate(actions):
                 env.step(action)
-                env.render()
+                # env.render()
+                obs, reward, done, info = env.step(action)
+                frame = obs["image"][::-1]
+                writer.append_data(frame)
 
                 if j < num_actions - 1:
-                    # ensure that the actions deterministically lead to the same recorded states
-                    state_playback = env.sim.get_state().flatten()
-                    if not np.all(np.equal(states[j + 1], state_playback)):
-                        err = np.linalg.norm(states[j + 1] - state_playback)
-                        print(f"[warning] playback diverged by {err:.2f} for ep {ep} at step {j}")
+                    env.sim.set_state_from_flattened(states[j+1])
+                #     # ensure that the actions deterministically lead to the same recorded states
+                #     state_playback = env.sim.get_state().flatten()
+                #     assert(np.all(np.equal(states[j + 1], state_playback)))
 
         else:
 
