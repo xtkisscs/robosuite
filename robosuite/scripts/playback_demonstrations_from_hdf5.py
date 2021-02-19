@@ -4,7 +4,7 @@ a set of demonstrations stored in a hdf5 file.
 
 Arguments:
     --folder (str): Path to demonstrations
-    --use_actions (optional): If this flag is provided, the actions are played back 
+    --use_actions (optional): If this flag is provided, the actions are played back
         through the MuJoCo simulator, instead of loading the simulator states
         one by one.
 
@@ -15,10 +15,13 @@ import os
 import h5py
 import argparse
 import random
+from os import path
+import imageio
 import numpy as np
 
 import robosuite
 from robosuite.utils.mjcf_utils import postprocess_model_xml
+ROBOSUITE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -30,9 +33,10 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--use-actions", 
+        "--use-actions",
         action='store_true',
     )
+    parser.add_argument("--recording", type=bool, default=True)
     args = parser.parse_args()
 
     demo_path = args.folder
@@ -44,8 +48,8 @@ if __name__ == "__main__":
         env_name,
         has_renderer=True,
         ignore_done=True,
-        use_camera_obs=False,
-        gripper_visualization=True,
+        use_camera_obs=True,
+        gripper_visualization=False,
         reward_shaping=True,
         control_freq=100,
     )
@@ -72,8 +76,22 @@ if __name__ == "__main__":
         env.viewer.set_camera(0)
 
         # load the flattened mujoco states
-        states = f["data/{}/states".format(ep)].value
+        states = f["data/{}/states".format(ep)]
+        if args.recording:
+            file_path = os.path.abspath(os.path.join(ROBOSUITE_DIR, 'videos'))
+            if not path.exists(file_path):
+                os.mkdir(file_path)
+                file_name = 'vid_0.mp4'
+            else:
+                vids = os.listdir(file_path)
+                nums = [int(v.split('vid_')[1].split('.')[0]) for v in vids if 'vid_' in v]
+                num = max(nums) + 1 if nums.__len__() > 0 else 0
+                file_name = 'vid_' + str(num) + '.mp4'
 
+            fname = os.path.abspath(os.path.join(ROBOSUITE_DIR, 'videos', file_name))
+            writer = imageio.get_writer(fname, fps=120)
+
+        args.use_actions=True
         if args.use_actions:
 
             # load the initial state
@@ -81,19 +99,23 @@ if __name__ == "__main__":
             env.sim.forward()
 
             # load the actions and play them back open-loop
-            jvels = f["data/{}/joint_velocities".format(ep)].value
-            grip_acts = f["data/{}/gripper_actuations".format(ep)].value
+            jvels = f["data/{}/joint_velocities".format(ep)]
+            grip_acts = f["data/{}/gripper_actuations".format(ep)]
             actions = np.concatenate([jvels, grip_acts], axis=1)
             num_actions = actions.shape[0]
 
             for j, action in enumerate(actions):
                 env.step(action)
-                env.render()
+                # env.render()
+                obs, reward, done, info = env.step(action)
+                frame = obs["image"][::-1]
+                writer.append_data(frame)
 
                 if j < num_actions - 1:
-                    # ensure that the actions deterministically lead to the same recorded states
-                    state_playback = env.sim.get_state().flatten()
-                    assert(np.all(np.equal(states[j + 1], state_playback)))
+                    env.sim.set_state_from_flattened(states[j+1])
+                #     # ensure that the actions deterministically lead to the same recorded states
+                #     state_playback = env.sim.get_state().flatten()
+                #     assert(np.all(np.equal(states[j + 1], state_playback)))
 
         else:
 
